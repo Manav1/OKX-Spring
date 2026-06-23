@@ -1,0 +1,19 @@
+server:
+  port: 8080
+
+okx:
+  rest:
+    base-url: https://www.okx.com
+    tickers-path: /api/v5/market/tickers
+  websocket:
+    public-url: wss://ws.okx.com:8443/ws/v5/public
+  top-instruments:
+    count: 20
+
+auth:
+  username: admin
+  password: admin123
+
+logging:
+  level:
+    com.okx: DEBUG

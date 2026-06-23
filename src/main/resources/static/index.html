@@ -1,0 +1,512 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>OKX Market Data</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/sockjs-client/1.6.1/sockjs.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/stomp.js/2.3.3/stomp.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'Segoe UI', monospace;
+      background: #0d1117;
+      color: #c9d1d9;
+      padding: 20px;
+    }
+
+    h1 { color: #58a6ff; margin-bottom: 20px; font-size: 20px; font-weight: 600; }
+    h3 { color: #8b949e; font-size: 11px; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 12px; }
+
+    /* ── Layout ─────────────────────────────────────────── */
+    .layout {
+      display: grid;
+      grid-template-columns: 33% 67%;
+      grid-template-rows: auto auto auto 1fr;
+      gap: 14px;
+    }
+
+    .panel {
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-radius: 8px;
+      padding: 16px;
+    }
+
+
+    .panel-log  { grid-column: 1 / -1; grid-row: 1; }
+    .panel-auth { grid-column: 1; grid-row: 2; }
+
+
+    .panel-ob   { grid-column: 2; grid-row: 2 / 5; }
+
+
+    .panel-top20 { grid-column: 1; grid-row: 3; }
+
+
+
+
+    /* ── Inputs / Buttons ───────────────────────────────── */
+    input {
+      background: #21262d;
+      color: #c9d1d9;
+      border: 1px solid #30363d;
+      border-radius: 4px;
+      padding: 6px 10px;
+      font-family: monospace;
+      font-size: 13px;
+    }
+
+    button {
+      border: none;
+      border-radius: 4px;
+      padding: 6px 13px;
+      cursor: pointer;
+      font-size: 12px;
+      margin: 3px 3px 3px 0;
+    }
+    .btn-blue  { background: #1f6feb; color: #fff; }
+    .btn-green { background: #238636; color: #fff; }
+    .btn-red   { background: #da3633; color: #fff; }
+    .btn-grey  { background: #30363d; color: #c9d1d9; }
+
+    /* ── Tags / Badges ──────────────────────────────────── */
+    .tag { display:inline-block; padding:1px 6px; border-radius:3px; font-size:11px; margin-right:5px; }
+    .green  { background:#1a4731; color:#3fb950; }
+    .blue   { background:#1c3a5e; color:#79c0ff; }
+    .orange { background:#3d2b00; color:#e3b341; }
+    .red-tag{ background:#3d0c02; color:#f85149; }
+
+    .badge { display:inline-block; padding:2px 8px; border-radius:10px; font-size:11px; }
+    .connected    { background:#1a4731; color:#3fb950; }
+    .disconnected { background:#3d0c02; color:#f85149; }
+
+    /* ── Log ────────────────────────────────────────────── */
+    #log  { height:150px; overflow-y:auto; font-size:12px; line-height:1.6; }
+    .msg  { border-bottom:1px solid #21262d; padding:2px 0; }
+    .ts   { color:#484f58; margin-right:6px; }
+
+    /* ── Top-20 table ───────────────────────────────────── */
+    .tbl { width:100%; border-collapse:collapse; font-size:12px; }
+    .tbl th {
+      text-align:left; color:#8b949e; font-weight:normal;
+      padding:5px 8px; border-bottom:1px solid #30363d;
+      position: sticky; top: 0; background: #161b22;
+    }
+    .tbl td { padding:5px 8px; border-bottom:1px solid #21262d; white-space:nowrap; }
+    .top20-scroll { max-height:260px; overflow-y:auto; }
+
+    /* ── Order book ─────────────────────────────────────── */
+    /*
+     * Key fix: we pre-allocate a fixed height for the order book body
+     * so the page never reflows when data arrives.
+     * 15 asks + spread row + 15 bids = 31 rows × 28px each = 868px
+     * We cap it at that and let the panel grow with the page, not with data.
+     */
+    .ob-container {
+      display: flex;
+      flex-direction: column;
+      height: 100%;
+    }
+
+    .ob-controls { margin-bottom: 12px; flex-shrink: 0; }
+
+    .ob-table-wrap {
+      flex: 1;
+      overflow: hidden;          /* no scrollbar — rows are always exactly 31 */
+    }
+
+    .ob-tbl {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12px;
+      table-layout: fixed;       /* columns never resize as numbers change */
+    }
+
+    .ob-tbl th {
+      text-align: left;
+      color: #8b949e;
+      font-weight: normal;
+      padding: 5px 8px;
+      border-bottom: 1px solid #30363d;
+    }
+
+    /* Fixed column widths — prevents number width changes from shifting layout */
+    .ob-tbl col.c-side   { width: 40px; }
+    .ob-tbl col.c-price  { width: 38%; }
+    .ob-tbl col.c-qty    { width: 32%; }
+    .ob-tbl col.c-orders { width: 18%; }
+
+    .ob-tbl td {
+      padding: 4px 8px;
+      border-bottom: 1px solid #1c2128;
+      height: 26px;              /* fixed row height — rows never grow/shrink */
+      overflow: hidden;
+      white-space: nowrap;
+      font-variant-numeric: tabular-nums;  /* monospaced number rendering */
+    }
+
+    /* Pre-render 31 empty placeholder rows so the panel has its full height
+       before any data arrives — no layout jump on first message */
+    .ob-placeholder td { color: #21262d; }
+
+    .ob-spread td {
+      text-align: center;
+      color: #484f58;
+      font-size: 11px;
+      background: #1c2128;
+      height: 22px;
+    }
+
+    .ask { color: #f85149; }
+    .bid { color: #3fb950; }
+    .up  { color: #3fb950; }
+    .down{ color: #f85149; }
+    .flat{ color: #8b949e; }
+
+    .ob-footer { flex-shrink:0; margin-top:6px; font-size:11px; color:#484f58; min-height:18px; }
+
+    code { background:#21262d; padding:1px 5px; border-radius:3px; font-size:11px; }
+    .token-box { font-size:11px; color:#484f58; margin-top:6px; word-break:break-all; min-height:16px; }
+    .auth-result { margin-top:10px; font-size:12px; min-height:18px; }
+  </style>
+</head>
+<body>
+<h1>🔷 OKX Market Data Service</h1>
+
+<div class="layout">
+
+  <!-- Log -->
+  <div class="panel panel-log">
+    <h3>Event Log
+      <button class="btn-grey" onclick="clearLog()" style="float:right;font-size:11px">Clear</button>
+    </h3>
+    <div id="log"></div>
+  </div>
+
+
+  <!-- ① Auth -->
+  <div class="panel panel-auth">
+    <h3>① Auth — Login</h3>
+    <p style="font-size:12px;color:#8b949e;margin-bottom:10px;">
+      <code>POST /api/auth/login</code> — dummy auth
+    </p>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;">
+      <input id="authUser" value="admin" placeholder="username" style="width:110px">
+      <input id="authPass" value="admin123" placeholder="password" style="width:110px" type="password">
+    </div>
+    <div style="margin-top:8px;">
+      <button class="btn-blue" onclick="doLogin()">Login</button>
+      <button class="btn-grey" onclick="doLogout()">Logout</button>
+    </div>
+    <div class="auth-result" id="authResult"></div>
+    <div class="token-box"   id="tokenDisplay"></div>
+  </div>
+
+  <!-- ③ Order Book — right column, spans all rows -->
+  <div class="panel panel-ob">
+    <div class="ob-container">
+
+      <div class="ob-controls">
+        <h3>③ WebSocket — Live Order Book</h3>
+        <p style="font-size:12px;color:#8b949e;margin-bottom:10px;">
+          OKX channel: <code>books</code> — top 15 bids &amp; asks
+        </p>
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+          <input id="obInstId" value="BTC-USDT" placeholder="BTC-USDT" style="width:120px">
+          <button class="btn-green" onclick="subscribeOrderBook()">Subscribe</button>
+          <button class="btn-red"   onclick="unsubscribeOrderBook()">Stop</button>
+          <span id="obStatus" class="badge disconnected">Disconnected</span>
+        </div>
+      </div>
+
+      <div class="ob-table-wrap">
+        <table class="ob-tbl" id="obTable">
+          <colgroup>
+            <col class="c-side">
+            <col class="c-price">
+            <col class="c-qty">
+            <col class="c-orders">
+          </colgroup>
+          <thead>
+          <tr>
+            <th>Side</th>
+            <th id="colPrice">Price</th>
+            <th id="colQty">Qty</th>
+            <th>Orders</th>
+          </tr>
+          </thead>
+          <tbody id="obRows">
+          <!-- 31 placeholder rows: 15 asks + spread + 15 bids
+               These give the panel its full height before data arrives.
+               renderOrderBook() overwrites them in-place. -->
+          </tbody>
+        </table>
+      </div>
+
+      <div class="ob-footer" id="obTs"></div>
+
+    </div>
+  </div>
+
+  <!-- ② Top 20 -->
+  <div class="panel panel-top20">
+    <h3>② REST — Top 20 Traded SPOT Pairs</h3>
+    <p style="font-size:12px;color:#8b949e;margin-bottom:10px;">
+      <code>GET /api/market/top-pairs</code> — ranked by 24h quote volume
+    </p>
+    <button class="btn-blue" onclick="fetchTopPairs()">Fetch Top 20</button>
+    <div class="top20-scroll" style="margin-top:10px;" id="topPairsResult"></div>
+  </div>
+
+</div>
+
+<script>
+  let sessionToken = null;
+  let stompClient  = null;
+  let obSub        = null;
+
+  // ── Build placeholder rows on load so the OB panel has its full height ──
+  (function buildPlaceholders() {
+    const rows = document.getElementById('obRows');
+    let html = '';
+    // 15 ask placeholders
+    for (let i = 0; i < 15; i++) {
+      html += `<tr class="ob-placeholder"><td></td><td>—</td><td>—</td><td>—</td></tr>`;
+    }
+    // spread placeholder
+    html += `<tr class="ob-spread"><td colspan="4">——</td></tr>`;
+    // 15 bid placeholders
+    for (let i = 0; i < 15; i++) {
+      html += `<tr class="ob-placeholder"><td></td><td>—</td><td>—</td><td>—</td></tr>`;
+    }
+    rows.innerHTML = html;
+  })();
+
+  // ── Auth ──────────────────────────────────────────────────────────
+  async function doLogin() {
+    const username = document.getElementById('authUser').value.trim();
+    const password = document.getElementById('authPass').value.trim();
+    log(`Login attempt: ${username}`, 'blue');
+    try {
+      const res  = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, password })
+      });
+      const data = await res.json();
+      if (res.ok) {
+        sessionToken = data.token;
+        document.getElementById('authResult').innerHTML =
+                `<span style="color:#3fb950">✓ ${data.message} (${data.user})</span>`;
+        document.getElementById('tokenDisplay').textContent = `Token: ${sessionToken}`;
+        log(`Login success — token issued for ${data.user}`, 'green');
+      } else {
+        sessionToken = null;
+        document.getElementById('authResult').innerHTML =
+                `<span style="color:#f85149">✗ ${data.message}</span>`;
+        document.getElementById('tokenDisplay').textContent = '';
+        log(`Login failed: ${data.message}`, 'red-tag');
+      }
+    } catch (e) { log('Auth error: ' + e.message, 'red-tag'); }
+  }
+
+  async function doLogout() {
+    if (!sessionToken) return;
+    await fetch('/api/auth/logout', {
+      method: 'POST', headers: { 'X-Session-Token': sessionToken }
+    });
+    sessionToken = null;
+    document.getElementById('authResult').innerHTML =
+            '<span style="color:#8b949e">Logged out</span>';
+    document.getElementById('tokenDisplay').textContent = '';
+    log('Logged out', 'orange');
+  }
+
+  // ── REST: Top 20 ──────────────────────────────────────────────────
+  async function fetchTopPairs() {
+    if (!sessionToken) { log('Login required', 'red-tag'); return; }
+    log('Fetching top 20 SPOT pairs…', 'blue');
+    try {
+      const res  = await fetch('/api/market/top-pairs', {
+        headers: { 'X-Session-Token': sessionToken }
+      });
+      if (res.status === 401) { log('Session expired — please login again', 'red-tag'); return; }
+      const data = await res.json();
+
+      document.getElementById('topPairsResult').innerHTML = `
+      <table class="tbl">
+        <thead><tr>
+          <th>#</th><th>Pair</th><th>Last</th>
+          <th>24h Chg%</th><th>High</th><th>Low</th><th>Vol 24h</th>
+        </tr></thead>
+        <tbody>
+          ${data.map((t, i) => {
+        const last = safeNum(t.lastPrice);
+        const high = safeNum(t.high24h);
+        const low  = safeNum(t.low24h);
+        const vol  = safeNum(t.volumeCcy24h);
+        const chg  = safeNum(t.change24hPct);
+        const [, quote] = (t.instId || '').split('-');
+        const chgCls = chg === null ? 'flat' : chg > 0 ? 'up' : chg < 0 ? 'down' : 'flat';
+        const chgStr = chg === null ? '—' : (chg > 0 ? '+' : '') + chg.toFixed(2) + '%';
+        return `<tr>
+              <td style="color:#484f58">${i+1}</td>
+              <td><b style="color:#58a6ff">${t.instId}</b></td>
+              <td>${last !== null ? last.toLocaleString() : '—'}</td>
+              <td class="${chgCls}">${chgStr}</td>
+              <td class="up">${high !== null ? high.toLocaleString() : '—'}</td>
+              <td class="down">${low  !== null ? low.toLocaleString() : '—'}</td>
+              <td>${vol  !== null ? fmtVol(vol) + ' ' + (quote||'') : '—'}</td>
+            </tr>`;
+      }).join('')}
+        </tbody>
+      </table>`;
+      log(`Received ${data.length} pairs`, 'green');
+    } catch (e) { log('Error: ' + e.message, 'red-tag'); }
+  }
+
+  // ── WS: Order Book ────────────────────────────────────────────────
+  async function subscribeOrderBook() {
+    if (!sessionToken) { log('Login required', 'red-tag'); return; }
+    const id = document.getElementById('obInstId').value.trim().toUpperCase();
+    const [base, quote] = id.split('-');
+    document.getElementById('colPrice').textContent = `Price (${quote || '—'})`;
+    document.getElementById('colQty').textContent   = `Qty (${base || '—'})`;
+
+    log(`Opening order book stream: ${id}`, 'blue');
+    const res = await fetch('/api/market/orderbook/' + id, {
+      method: 'POST', headers: { 'X-Session-Token': sessionToken }
+    });
+    if (res.status === 401) { log('Session expired — please login again', 'red-tag'); return; }
+
+    ensureStompConnected(() => {
+      if (obSub) obSub.unsubscribe();
+      obSub = stompClient.subscribe('/topic/orderbook/' + id, frame => {
+        try {
+          const msg = JSON.parse(frame.body);
+          if (msg.data && msg.data[0]) renderOrderBook(msg.data[0]);
+          else if (msg.event) log(`OKX: ${JSON.stringify(msg)}`, 'orange');
+        } catch(e) {}
+      });
+      setStatus('obStatus', true);
+      log(`Subscribed: ${id}`, 'green');
+    });
+  }
+
+  async function unsubscribeOrderBook() {
+    if (!sessionToken) { log('Login required', 'red-tag'); return; }
+    const id = document.getElementById('obInstId').value.trim().toUpperCase();
+    await fetch('/api/market/orderbook/' + id, {
+      method: 'DELETE', headers: { 'X-Session-Token': sessionToken }
+    });
+    if (obSub) { obSub.unsubscribe(); obSub = null; }
+    setStatus('obStatus', false);
+    // Reset to placeholders instead of hiding the table
+    buildPlaceholders();
+    document.getElementById('obTs').textContent = '';
+    log(`Unsubscribed: ${id}`, 'orange');
+  }
+
+  /**
+   * Renders the order book by directly updating each row's cells.
+   * We never change the number of rows — only the text content of cells.
+   * This prevents any layout reflow or element repositioning.
+   */
+  function renderOrderBook(book) {
+    const rows   = document.getElementById('obRows').rows;
+    const asks   = (book.asks || []).slice(0, 15);
+    const bids   = (book.bids || []).slice(0, 15);
+
+    // Rows 0–14: asks (displayed highest-to-lowest, so reversed)
+    const asksDisplay = [...asks].reverse();
+    for (let i = 0; i < 15; i++) {
+      const row = rows[i];
+      const a   = asksDisplay[i];
+      row.className = '';
+      row.cells[0].innerHTML = `<span style="color:#8b949e;font-size:11px">ASK</span>`;
+      row.cells[1].className = 'ask';
+      row.cells[1].textContent = a ? a[0] : '—';
+      row.cells[2].textContent = a ? a[1] : '—';
+      row.cells[3].textContent = a ? a[3] : '—';
+    }
+
+    // Row 15: spread
+    const spreadRow = rows[15];
+    spreadRow.className = 'ob-spread';
+    if (asks[0] && bids[0]) {
+      const spread = (parseFloat(asks[0][0]) - parseFloat(bids[0][0])).toFixed(4);
+      spreadRow.cells[0].colSpan = 4;
+      spreadRow.cells[0].textContent = `spread  ${spread}`;
+      // hide remaining cells if any
+      for (let c = 1; c < spreadRow.cells.length; c++) {
+        spreadRow.cells[c].style.display = 'none';
+      }
+    }
+
+    // Rows 16–30: bids
+    for (let i = 0; i < 15; i++) {
+      const row = rows[16 + i];
+      const b   = bids[i];
+      row.className = '';
+      row.cells[0].innerHTML = `<span style="color:#8b949e;font-size:11px">BID</span>`;
+      row.cells[1].className = 'bid';
+      row.cells[1].textContent = b ? b[0] : '—';
+      row.cells[2].textContent = b ? b[1] : '—';
+      row.cells[3].textContent = b ? b[3] : '—';
+    }
+
+    document.getElementById('obTs').textContent =
+            'Updated: ' + new Date(parseInt(book.ts)).toLocaleTimeString();
+  }
+
+  function buildPlaceholders() {
+    const rows = document.getElementById('obRows');
+    let html = '';
+    for (let i = 0; i < 15; i++)
+      html += `<tr class="ob-placeholder"><td></td><td>—</td><td>—</td><td>—</td></tr>`;
+    html += `<tr class="ob-spread"><td colspan="4">——</td></tr>`;
+    for (let i = 0; i < 15; i++)
+      html += `<tr class="ob-placeholder"><td></td><td>—</td><td>—</td><td>—</td></tr>`;
+    rows.innerHTML = html;
+  }
+
+  // ── STOMP ─────────────────────────────────────────────────────────
+  function ensureStompConnected(cb) {
+    if (stompClient && stompClient.connected) { cb(); return; }
+    const socket = new SockJS('/ws');
+    stompClient  = Stomp.over(socket);
+    stompClient.debug = null;
+    stompClient.connect({}, () => { log('STOMP connected', 'blue'); cb(); });
+  }
+
+  // ── Utilities ─────────────────────────────────────────────────────
+  function safeNum(v) {
+    if (v === null || v === undefined || v === '') return null;
+    const n = parseFloat(v); return isNaN(n) ? null : n;
+  }
+
+  function fmtVol(n) {
+    if (n >= 1e9) return (n/1e9).toFixed(2)+'B';
+    if (n >= 1e6) return (n/1e6).toFixed(2)+'M';
+    if (n >= 1e3) return (n/1e3).toFixed(2)+'K';
+    return n.toFixed(2);
+  }
+
+  function setStatus(id, on) {
+    const el = document.getElementById(id);
+    el.className   = 'badge ' + (on ? 'connected' : 'disconnected');
+    el.textContent = on ? 'Live ●' : 'Disconnected';
+  }
+
+  function log(msg, type) {
+    const div = document.getElementById('log');
+    const ts  = new Date().toLocaleTimeString('en-GB', { hour12: false });
+    const tag = type ? `<span class="tag ${type}">${type.toUpperCase()}</span>` : '';
+    div.innerHTML = `<div class="msg"><span class="ts">${ts}</span>${tag}${msg}</div>` + div.innerHTML;
+  }
+
+  function clearLog() { document.getElementById('log').innerHTML = ''; }
+</script>
+</body>
+</html>
